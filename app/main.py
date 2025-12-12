@@ -25,9 +25,8 @@ DATA_PATH = os.path.join(BASE_DIR, "sample_sales.csv")  # default CSV in same fo
 UPLOADED_PATH = os.path.join(BASE_DIR, "uploaded_data.csv")
 
 
-# -------------------------
+
 # Utility: robust CSV loader
-# -------------------------
 def try_parse_dates(df: pd.DataFrame) -> pd.DataFrame:
     """
     Try to detect date-like columns and convert them to datetime dtype.
@@ -39,7 +38,7 @@ def try_parse_dates(df: pd.DataFrame) -> pd.DataFrame:
             if len(sample) > 0 and date_like / len(sample) > 0.5:
                 # attempt parse
                 try:
-                    df[col] = pd.to_datetime(df[col], errors="coerce", dayfirst=False, infer_datetime_format=True)
+                    df[col] = pd.to_datetime(df[col], errors="coerce", dayfirst=False)
                 except Exception:
                     pass
     return df
@@ -59,7 +58,7 @@ def load_data(path: str = None) -> pd.DataFrame:
     if os.path.exists(DATA_PATH):
         candidate_paths.append(DATA_PATH)
 
-    for p in candidate_paths:
+    for p in candidate_paths: # try each path
         try:
             # read with pandas; don't force parse_dates to allow flexible parsing later
             df = pd.read_csv(p, dtype=str)  # read as strings initially
@@ -67,8 +66,12 @@ def load_data(path: str = None) -> pd.DataFrame:
             df.columns = [c.strip().replace("\ufeff", "") for c in df.columns]
             # coerce numeric columns where possible
             for col in df.columns:
-                # try numeric conversion
-                coerced = pd.to_numeric(df[col].str.replace(",", "").str.strip(), errors="coerce")
+                # try numeric conversion - remove common formatting
+                # Remove currency symbols, commas, spaces, and other common formatting
+                cleaned = df[col].astype(str).str.replace(r"[\$\£\€\₹Rs\s,]", "", regex=True).str.strip()
+                # Remove any remaining non-numeric characters except decimal point and minus sign
+                cleaned = cleaned.str.replace(r"[^\d\.\-]", "", regex=True)
+                coerced = pd.to_numeric(cleaned, errors="coerce")
                 # if many non-NaN numeric -> replace
                 if coerced.notna().sum() / max(1, len(df)) > 0.6:
                     df[col] = coerced
@@ -81,9 +84,7 @@ def load_data(path: str = None) -> pd.DataFrame:
     raise FileNotFoundError(f"No data file found. Checked: {candidate_paths}")
 
 
-# -------------------------
 # Simple KPI endpoint
-# -------------------------
 @app.get("/kpis")
 def kpis(path: Optional[str] = None):
     """
@@ -107,12 +108,24 @@ def kpis(path: Optional[str] = None):
     total_customers = None
 
     if revenue_col:
-        total_revenue = float(df[revenue_col].dropna().astype(float).sum())
+        # Ensure numeric type before summing
+        numeric_values = pd.to_numeric(df[revenue_col], errors="coerce").dropna()
+        if len(numeric_values) > 0:
+            total_revenue = float(numeric_values.sum())
+        else:
+            total_revenue = None
     if order_col:
         total_orders = int(df[order_col].dropna().nunique())
     if order_col and revenue_col:
         try:
-            avg_order_value = float(df.groupby(order_col)[revenue_col].sum().mean())
+            # Ensure both columns are properly typed
+            df_grouped = df.copy()
+            df_grouped[revenue_col] = pd.to_numeric(df_grouped[revenue_col], errors="coerce")
+            df_grouped = df_grouped.dropna(subset=[order_col, revenue_col])
+            if len(df_grouped) > 0:
+                avg_order_value = float(df_grouped.groupby(order_col)[revenue_col].sum().mean())
+            else:
+                avg_order_value = None
         except Exception:
             avg_order_value = None
     if customer_col:
@@ -129,9 +142,8 @@ def kpis(path: Optional[str] = None):
     }
 
 
-# -------------------------
+
 # Timeseries endpoint
-# -------------------------
 @app.get("/timeseries")
 def timeseries(metric: str = "revenue", from_date: Optional[str] = None, to_date: Optional[str] = None, path: Optional[str] = None):
     """
@@ -182,8 +194,13 @@ def timeseries(metric: str = "revenue", from_date: Optional[str] = None, to_date
         if not revs:
             raise HTTPException(status_code=400, detail="No revenue-like column found")
         rev_col = revs[0]
-        ts = df.groupby(df[date_col].dt.date)[rev_col].sum().reset_index()
-        labels = ts[date_col.name].astype(str).tolist()
+        # Ensure numeric type
+        df_ts = df.copy()
+        df_ts[rev_col] = pd.to_numeric(df_ts[rev_col], errors="coerce")
+        df_ts = df_ts.dropna(subset=[date_col, rev_col])
+        ts = df_ts.groupby(df_ts[date_col].dt.date)[rev_col].sum().reset_index()
+        # After reset_index(), the date column is the first column (index 0)
+        labels = ts.iloc[:, 0].astype(str).tolist()
         values = ts[rev_col].round(2).tolist()
     elif metric == "orders":
         # detect order id
@@ -191,22 +208,26 @@ def timeseries(metric: str = "revenue", from_date: Optional[str] = None, to_date
         if not order_col:
             raise HTTPException(status_code=400, detail="No order id-like column found")
         ts = df.groupby(df[date_col].dt.date)[order_col].nunique().reset_index()
-        labels = ts[date_col.name].astype(str).tolist()
+        # After reset_index(), the date column is the first column (index 0)
+        labels = ts.iloc[:, 0].astype(str).tolist()
         values = ts[order_col].astype(int).tolist()
     else:
         # if metric is a numeric column name
         if metric not in df.columns:
             raise HTTPException(status_code=400, detail=f"Metric column '{metric}' not found")
-        ts = df.groupby(df[date_col].dt.date)[metric].sum().reset_index()
-        labels = ts[date_col.name].astype(str).tolist()
+        # Ensure numeric type
+        df_ts = df.copy()
+        df_ts[metric] = pd.to_numeric(df_ts[metric], errors="coerce")
+        df_ts = df_ts.dropna(subset=[date_col, metric])
+        ts = df_ts.groupby(df_ts[date_col].dt.date)[metric].sum().reset_index()
+        # After reset_index(), the date column is the first column (index 0)
+        labels = ts.iloc[:, 0].astype(str).tolist()
         values = ts[metric].round(2).tolist()
 
     return {"metric": metric, "labels": labels, "values": values}
 
 
-# -------------------------
 # Breakdown endpoint
-# -------------------------
 @app.get("/breakdown")
 def breakdown(by: str = "product", top_n: int = 10, path: Optional[str] = None):
     """
@@ -224,9 +245,20 @@ def breakdown(by: str = "product", top_n: int = 10, path: Optional[str] = None):
     # try to summarize by revenue if present, else by counts
     revs = [c for c in df.columns if re.search(r"revenue|price|amount|total|cost", c, re.I)]
     if revs:
-        agg = df.groupby(by)[revs[0]].sum().reset_index().sort_values(revs[0], ascending=False).head(top_n)
-        items = agg.to_dict(orient="records")
-        return {"by": by, "metric": revs[0], "items": items}
+        # Ensure the revenue column is numeric
+        df_agg = df.copy()
+        df_agg[revs[0]] = pd.to_numeric(df_agg[revs[0]], errors="coerce")
+        df_agg = df_agg.dropna(subset=[by, revs[0]])
+        if len(df_agg) > 0:
+            agg = df_agg.groupby(by)[revs[0]].sum().reset_index().sort_values(revs[0], ascending=False).head(top_n)
+            items = agg.to_dict(orient="records")
+            return {"by": by, "metric": revs[0], "items": items}
+        else:
+            # Fallback to counts if no valid numeric data
+            agg = df[by].value_counts().head(top_n).reset_index()
+            agg.columns = [by, "count"]
+            items = agg.to_dict(orient="records")
+            return {"by": by, "metric": "count", "items": items}
     else:
         agg = df[by].value_counts().head(top_n).reset_index()
         agg.columns = [by, "count"]
@@ -234,9 +266,8 @@ def breakdown(by: str = "product", top_n: int = 10, path: Optional[str] = None):
         return {"by": by, "metric": "count", "items": items}
 
 
-# -------------------------
+
 # Infer endpoint (heuristic)
-# -------------------------
 def infer_column_type(series: pd.Series) -> str:
     try:
         if pd.api.types.is_datetime64_any_dtype(series):
@@ -331,9 +362,8 @@ def infer_demo(path: Optional[str] = None):
     return {"rows": len(df), "cols": len(df.columns), "columns": meta, "recommendation": rec}
 
 
-# -------------------------
+
 # Upload endpoint
-# -------------------------
 @app.post("/upload")
 async def upload(file: UploadFile = File(...)):
     """
@@ -363,36 +393,3 @@ async def upload(file: UploadFile = File(...)):
     # inspect and save
     df.to_csv(UPLOADED_PATH, index=False)
     return {"detail": f"Uploaded and saved to {UPLOADED_PATH}", "rows": len(df), "cols": len(df.columns)}
-
-
-# -------------------------
-# Example pie endpoint (your original)
-# -------------------------
-@app.get("/pie")
-def devices_pie(path: Optional[str] = None):
-    """
-    Returns device distribution as counts and percentage share for pie chart.
-    """
-    try:
-        df = load_data(path=path)
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-    if "device" not in df.columns:
-        raise HTTPException(status_code=400, detail="Column 'device' not found in data")
-
-    counts_series = df["device"].value_counts()
-    labels = counts_series.index.tolist()
-    counts = counts_series.tolist()
-    total = int(counts_series.sum())
-    percentages = [round((c / total) * 100, 2) if total else 0 for c in counts]
-
-    subtitle = f"{total} orders across {len(labels)} devices"
-
-    return {
-        "labels": labels,
-        "counts": counts,
-        "percentages": percentages,
-        "total": total,
-        "subtitle": subtitle,
-    }
