@@ -1,7 +1,7 @@
 # backend_main.py
 from fastapi import FastAPI, UploadFile, File, HTTPException, APIRouter
 from fastapi.responses import JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.cors import CORSMiddleware # allows cross-origin requests
 import pandas as pd
 from typing import Optional, List, Dict, Any
 from datetime import datetime
@@ -15,9 +15,9 @@ app = FastAPI(title="Sample Analytics Backend (Demo)")
 # Support production and development URLs
 CORS_ORIGINS = [
     "http://localhost:5173",
-    "http://localhost:3000",
-    "http://192.168.8.124:5173",
-    "*",  # Allow all in production (or specify your frontend URL)
+    "http://localhost:3000"
+    
+      # Allow all in production (or specify your frontend URL)
 ]
 
 app.add_middleware(
